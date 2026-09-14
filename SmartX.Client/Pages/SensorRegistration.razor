@@ -1,0 +1,123 @@
+﻿@page "/register"
+@inject ApiClient Api
+
+<a class="back-link" href="/sensor-menu"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+    <h2>Register Sensor</h2>
+
+<EditForm Model="profile" OnValidSubmit="SubmitAsync">
+    <label>MAC Address / Unique Identifier</label>
+    <InputText @bind-Value="profile.MacAddress" placeholder="AA:BB:CC:00:00:03" />
+
+    <label>Sensor Category</label>
+    <InputSelect @bind-Value="profile.Category">
+        @foreach (var category in Enum.GetValues<SensorCategory>())
+        {
+            <option value="@category">@category</option>
+        }
+    </InputSelect>
+
+    <label>Facility</label>
+    <InputText @bind-Value="facilityName" />
+    <label>Zone</label>
+    <InputText @bind-Value="zoneName" />
+    <label>Node</label>
+    <InputText @bind-Value="nodeName" />
+
+    <label>Attach device configuration file, deployment photo, or hardware log</label>
+    <div class="file-drop">
+        <i class="ti ti-file-upload"></i>
+        @(selectedFile is null ? "No file selected" : selectedFile.Name)
+    </div>
+    <InputFile OnChange="OnFileSelected" style="margin-top: 8px;" />
+
+    @if (!string.IsNullOrEmpty(statusMessage))
+    {
+        <p class="success-message"><i class="ti ti-check" style="margin-right:4px;"></i>@statusMessage</p>
+    }
+    @if (validationErrors.Count > 0)
+    {
+        <ul class="error-list">
+            @foreach (var error in validationErrors)
+            {
+                <li>@error</li>
+            }
+        </ul>
+    }
+    <button type="submit">Register Sensor</button>
+</EditForm>
+
+@if (!string.IsNullOrEmpty(statusMessage))
+{
+    <p>@statusMessage</p>
+}
+@if (validationErrors.Count > 0)
+{
+    <ul style="color:#a1281f;">
+        @foreach (var error in validationErrors)
+        {
+            <li>@error</li>
+        }
+    </ul>
+}
+
+@code {
+    private SensorProfile profile = new();
+    private string facilityName = "Facility A";
+    private string zoneName = "Zone 1";
+    private string nodeName = "Sub-Zone B";
+    private IBrowserFile? selectedFile;
+    private string? statusMessage;
+    private List<string> validationErrors = new();
+
+    private void OnFileSelected(InputFileChangeEventArgs e) => selectedFile = e.File;
+
+    private async Task SubmitAsync()
+    {
+        validationErrors.Clear();
+
+        profile.DeploymentLocation = new DeploymentNode
+        {
+            Name = facilityName,
+            Tier = "Facility",
+            Children = new()
+            {
+                new DeploymentNode
+                {
+                    Name = zoneName,
+                    Tier = "Zone",
+                    Children = new() { new DeploymentNode { Name = nodeName, Tier = "Node" } }
+                }
+            }
+        };
+
+        var response = await Api.RegisterSensorAsync(profile);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var problem = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonDefaults.Options);
+            validationErrors = problem?.Errors ?? new() { "Registration failed." };
+            statusMessage = null;
+            return;
+        }
+
+        var created = await response.Content.ReadFromJsonAsync<SensorProfile>(JsonDefaults.Options);
+
+        if (selectedFile is not null && created is not null)
+        {
+            using var content = new MultipartFormDataContent();
+            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 20_000_000);
+            var fileContent = new StreamContent(stream);
+            content.Add(fileContent, "file", selectedFile.Name);
+            await Api.UploadAttachmentAsync(created.Id, content);
+        }
+
+        statusMessage = $"Sensor {created?.MacAddress} registered successfully under {facilityName} -> {zoneName} -> {nodeName}.";
+        profile = new();
+    }
+
+    public class ErrorPayload
+    {
+        public List<string>? Errors { get; set; }
+    }
+}

@@ -1,0 +1,46 @@
+﻿@page "/"
+@inject ApiClient Api
+
+<h1>Smart-X Gateway</h1>
+<p style="color: var(--text-secondary); font-size: 14px;">Choose an architectural pillar to work with</p>
+
+@if (pillars is null)
+{
+    <p><em>Loading menu...</em></p>
+}
+else
+{
+    <div class="pillar-grid">
+        @foreach (var pillar in pillars)
+        {
+            <div class="pillar-card @(pillar.Enabled ? "enabled" : "disabled")">
+                <span class="pillar-badge @(pillar.Enabled ? "enabled" : "disabled")">
+                    @(pillar.Enabled ? "Enabled" : "Coming soon")
+                </span>
+                <h3><i class="ti @IconFor(pillar.Title)" style="margin-right:6px;"></i>@pillar.Title</h3>
+                <p>@pillar.Description</p>
+                @if (pillar.Enabled)
+                {
+                    <a class="btn" href="@pillar.Route">Open</a>
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<MenuPillar>? pillars;
+
+    protected override async Task OnInitializedAsync()
+    {
+        pillars = await Api.GetMenuAsync();
+    }
+
+    private static string IconFor(string title) => title switch
+    {
+        var t when t.Contains("Ingestion") => "ti-broadcast",
+        var t when t.Contains("Command") => "ti-terminal-2",
+        var t when t.Contains("Topology") => "ti-topology-star-3",
+        _ => "ti-circle"
+    };
+}

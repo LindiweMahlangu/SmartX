@@ -1,0 +1,64 @@
+﻿@page "/dashboard"
+@implements IAsyncDisposable
+@using Microsoft.AspNetCore.SignalR.Client
+@inject IConfiguration Config
+
+<a class="back-link" href="/sensor-menu"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+<h2>Sensor Data Ingestion &amp; Telemetry</h2>
+
+<p><strong>Connection status:</strong> @connectionStatus</p>
+
+<div class="feed">
+    @foreach (var reading in liveFeed.OrderByDescending(r => r.Timestamp).Take(20))
+    {
+        <div class="reading-row @StatusClass(reading.Status)">
+            <span class="ts">@reading.Timestamp.ToLocalTime().ToString("HH:mm:ss")</span>
+            <span class="metric">@reading.MetricName</span>
+            <span class="value">@(reading.Status == AnomalyStatus.Disconnected ? "--" : reading.Value.ToString("F2")) @reading.Unit</span>
+            <span class="badge">@reading.Status</span>
+        </div>
+    }
+</div>
+
+@code {
+    private HubConnection? hubConnection;
+    private readonly List<TelemetryPacket<float>> liveFeed = new();
+    private string connectionStatus = "Connecting...";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var apiBaseUrl = Config["ApiBaseUrl"] ?? "http://localhost:5189/";
+
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl($"{apiBaseUrl.TrimEnd('/')}/telemetryHub")
+            .WithAutomaticReconnect()
+            .Build();
+
+        hubConnection.On<TelemetryPacket<float>>("ReceiveTelemetry", packet =>
+        {
+            liveFeed.Add(packet);
+            if (liveFeed.Count > 200) liveFeed.RemoveAt(0);
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.Reconnecting += _ => { connectionStatus = "Reconnecting..."; return InvokeAsync(StateHasChanged); };
+        hubConnection.Reconnected += _ => { connectionStatus = "Connected"; return InvokeAsync(StateHasChanged); };
+        hubConnection.Closed += _ => { connectionStatus = "Disconnected"; return InvokeAsync(StateHasChanged); };
+
+        await hubConnection.StartAsync();
+        connectionStatus = "Connected";
+    }
+
+    private static string StatusClass(AnomalyStatus status) => status switch
+    {
+        AnomalyStatus.Spike => "status-spike",
+        AnomalyStatus.Disconnected => "status-disconnected",
+        _ => "status-normal"
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null) await hubConnection.DisposeAsync();
+    }
+}

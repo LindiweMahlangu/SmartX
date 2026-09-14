@@ -1,0 +1,24 @@
+﻿@page "/sensor-menu"
+
+<h2>Sensor Data Ingestion &amp; Telemetry</h2>
+<p style="color: var(--text-secondary); font-size: 14px;">Choose what you'd like to do</p>
+
+<div class="pillar-grid">
+    <div class="pillar-card enabled">
+        <h3><i class="ti ti-activity" style="margin-right:6px;"></i>Live Dashboard</h3>
+        <p>Monitor live, anomaly-highlighted telemetry in real time.</p>
+        <a class="btn" href="/dashboard">Open</a>
+    </div>
+
+    <div class="pillar-card enabled">
+        <h3><i class="ti ti-cpu" style="margin-right:6px;"></i>Register Sensor</h3>
+        <p>Register a new device, set its deployment location, and attach files.</p>
+        <a class="btn" href="/register">Open</a>
+    </div>
+
+    <div class="pillar-card enabled">
+        <h3><i class="ti ti-calculator" style="margin-right:6px;"></i>Meter Aggregation</h3>
+        <p>Aggregate and compare meter readings using operator overloading.</p>
+        <a class="btn" href="/meters">Open</a>
+    </div>
+</div>

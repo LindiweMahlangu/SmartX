@@ -1,0 +1,36 @@
+﻿@page "/meters"
+@inject ApiClient Api
+
+<a class="back-link" href="/sensor-menu"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+<h2>Meter Aggregation (Operator Overloading Demo)</h2>
+
+<label>Meter 1 ID</label>
+<input @bind="id1" />
+<label>Meter 1 (kW)</label>
+<input type="number" step="0.1" @bind="kw1" />
+<label>Meter 2 ID</label>
+<input @bind="id2" />
+<label>Meter 2 (kW)</label>
+<input type="number" step="0.1" @bind="kw2" />
+<button @onclick="RunAsync">Calculate</button>
+
+@if (result is not null)
+{
+    <div class="result-card">
+        <p><span style="color: var(--text-secondary);">Meter3 (Meter1 + Meter2):</span> <strong>@result.Meter3</strong></p>
+        <p><span style="color: var(--text-secondary);">Delta (Meter1 - Meter2):</span> <strong>@result.Delta</strong></p>
+        <p>@result.Comparison</p>
+    </div>
+}
+
+@code {
+    private string id1 = "Meter1";
+    private string id2 = "Meter2";
+    private double kw1 = 12.5;
+    private double kw2 = 9.2;
+    private MeterAggregateResult? result;
+
+    private async Task RunAsync() => result = await Api.AggregateMetersAsync(id1, kw1, id2, kw2);
+}
+
