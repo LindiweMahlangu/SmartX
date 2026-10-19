@@ -1,11 +1,13 @@
 ﻿using SmartX.Shared.Models;
 
-namespace SmartX.API.Services
+using SmartX.Shared.Models;
+
+namespace SmartX.API.Services;
+
+public interface ISensorRepository
 {
-    public interface ISensorRepository
-    {
-        SensorProfile Add(SensorProfile profile);
-        SensorProfile? Get(Guid id);
-        IEnumerable<SensorProfile> GetAll();
-    }
+    SensorProfile Add(SensorProfile profile);
+    SensorProfile? Get(Guid id);
+    SensorProfile? GetByMac(string macAddress);
+    IEnumerable<SensorProfile> GetAll();
 }

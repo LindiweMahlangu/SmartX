@@ -1,0 +1,443 @@
+﻿@page "/command-stream"
+@implements IAsyncDisposable
+@using System.Globalization
+@using Microsoft.AspNetCore.SignalR.Client
+@inject ApiClient Api
+@inject IConfiguration Config
+@inject AppState State
+
+<a class="back-link" href="/"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+<h2>Real-Time Command Stream &amp; History</h2>
+<p class="muted">Connection status: @connectionStatus</p>
+
+<div class="metric-strip">
+    <div class="metric"><span>Standard queue (FIFO)</span><strong>@(queueStats?.StandardDepth ?? 0)</strong></div>
+    <div class="metric"><span>Priority queue</span><strong>@(queueStats?.PriorityDepth ?? 0)</strong></div>
+    <div class="metric"><span>Processed (standard / priority)</span><strong>@(queueStats?.ProcessedStandard ?? 0) / @(queueStats?.ProcessedPriority ?? 0)</strong></div>
+    <div class="metric"><span>Active alerts</span><strong>@(alerts?.Active.Count ?? 0)</strong></div>
+    <div class="metric"><span>Duplicate alerts suppressed</span><strong>@(alerts?.DuplicatesSuppressed ?? 0)</strong></div>
+</div>
+
+<div class="panel-grid">
+    <div class="panel">
+        <h3><i class="ti ti-bulb"></i> Suggested actions</h3>
+        @if (insights is null || insights.Suggestions.Count == 0)
+        {
+            <p class="muted">No suggestions right now. They appear when a known alert pattern is detected.</p>
+        }
+        else
+        {
+            foreach (var suggestion in insights.Suggestions)
+            {
+                <div class="suggestion">
+                    <div>
+                        <strong>@suggestion.Title</strong>
+                        <div class="muted">@suggestion.Reason (@ConfidenceText(suggestion))</div>
+                    </div>
+                    <button @onclick="() => ApplySuggestionAsync(suggestion)">@(suggestion.Command is not null ? "Run" : "Search")</button>
+                </div>
+            }
+        }
+    </div>
+
+    <div class="panel">
+        <h3><i class="ti ti-alert-triangle"></i> Automated insights</h3>
+        @if (insights is null || insights.ProblemDevices.Count == 0)
+        {
+            <p class="muted">No devices are showing repeated anomalies.</p>
+        }
+        else
+        {
+            foreach (var problem in insights.ProblemDevices)
+            {
+                <div class="suggestion">
+                    <div>
+                        <strong>@problem.MacAddress</strong>
+                        <div class="muted">@problem.Summary</div>
+                    </div>
+                    <button @onclick="() => SelectDeviceAsync(problem.SensorId)">Inspect</button>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+<div class="filters">
+    <div>
+        <label>Search devices</label>
+        <input @bind="SearchText" @bind:after="OnSearchChangedAsync" placeholder="MAC address or metric" />
+    </div>
+    <div>
+        <label>Category</label>
+        <select @bind="SelectedCategory" @bind:after="RefreshLiveAsync">
+            <option value="">All</option>
+            @foreach (var category in Enum.GetValues<SensorCategory>())
+            {
+                <option value="@category">@category</option>
+            }
+        </select>
+    </div>
+    <div>
+        <label>Alert state</label>
+        <select @bind="SelectedAlertState" @bind:after="RefreshLiveAsync">
+            <option value="">All</option>
+            @foreach (var status in Enum.GetValues<AnomalyStatus>())
+            {
+                <option value="@status">@status</option>
+            }
+        </select>
+    </div>
+</div>
+
+<div class="action-bar">
+    <button @onclick="() => SendCommandAsync(Guid.Empty, DeviceCommandType.ShutdownAllValves)">Shut down all valves</button>
+    <button @onclick="UndoAsync" disabled="@(undoPreview?.Available != true)">Undo last command</button>
+    <span class="muted">@UndoText()</span>
+    <span class="muted">@feedbackMessage</span>
+</div>
+
+@if (devices is null)
+{
+    <p><em>Loading devices...</em></p>
+}
+else if (devices.Count == 0)
+{
+    <p>No devices match the current filter.</p>
+}
+else
+{
+    <div class="feed">
+        @foreach (var device in devices)
+        {
+            <div class="reading-row @StatusClass(device.LastStatus) @SelectedClass(device)" style="cursor: pointer;" @onclick="() => SelectDeviceAsync(device.SensorId)">
+                <span style="width: 160px; font-weight: 500; font-size: 13px;">@device.MacAddress</span>
+                <span style="width: 120px; font-size: 13px;">@device.Category</span>
+                <span class="value" style="width: 110px;">@FormatValue(device)</span>
+                <span class="badge" style="width: 100px; margin-left: 0;">@device.LastStatus</span>
+
+                @if (device.Category == SensorCategory.Actuator)
+                {
+                    <span style="width: 40px; font-size: 12px;">@(device.ActuatorOn ? "ON" : "OFF")</span>
+                    <button @onclick="() => SendCommandAsync(device.SensorId, DeviceCommandType.TriggerPump)" @onclick:stopPropagation="true">Trigger pump</button>
+                    <button @onclick="() => SendCommandAsync(device.SensorId, DeviceCommandType.StopPump)" @onclick:stopPropagation="true">Stop pump</button>
+                    <button @onclick="() => SendCommandAsync(device.SensorId, DeviceCommandType.ToggleRelay)" @onclick:stopPropagation="true">Toggle relay</button>
+                }
+            </div>
+        }
+    </div>
+}
+
+@if (State.SelectedDeviceId is not null)
+{
+    <h3 style="margin-top: 1.5rem;">Timeline: @SelectedLabel()</h3>
+    @if (timeline.Count < 2)
+    {
+        <p class="muted">Not enough readings yet to draw a timeline.</p>
+    }
+    else
+    {
+        <svg viewBox="0 0 600 160" style="width: 100%; max-width: 680px; background: var(--surface); border: 0.5px solid var(--border); border-radius: 10px;">
+            @foreach (var segment in ChartSegments())
+            {
+                <polyline points="@segment" style="fill: none; stroke: var(--accent); stroke-width: 2;" />
+            }
+            @foreach (var marker in ChartPoints().Where(q => q.Status != AnomalyStatus.Normal))
+            {
+                <circle cx="@F(marker.X)" cy="@F(marker.Y)" r="4" style="@MarkerStyle(marker.Status)" />
+            }
+        </svg>
+        <p class="muted">Readings come from a SortedDictionary keyed by timestamp, so they are already in time order. Amber dots are anomalies, red dots are disconnects.</p>
+    }
+}
+
+@if (alerts is not null && alerts.Active.Count > 0)
+{
+    <h3 style="margin-top: 1.5rem;">Active alerts</h3>
+    <ul>
+        @foreach (var alert in alerts.Active)
+        {
+            <li style="font-size: 13px;">@alert.RaisedAt.ToLocalTime().ToString("HH:mm:ss") - @alert.Message</li>
+        }
+    </ul>
+}
+
+@if (State.CommandLog.Count > 0)
+{
+    <h3 style="margin-top: 1.5rem;">Recent command activity</h3>
+    <ul>
+        @foreach (var entry in State.CommandLog.Take(10))
+        {
+            <li style="font-size: 13px;">@entry.ExecutedAt.ToLocalTime().ToString("HH:mm:ss") - @entry.Message</li>
+        }
+    </ul>
+}
+
+@code {
+    private const double ChartWidth = 600;
+    private const double ChartHeight = 160;
+    private const double ChartPad = 12;
+
+    private List<DeviceState>? devices;
+    private QueueStats? queueStats;
+    private AlertSnapshot? alerts;
+    private InsightsResponse? insights;
+    private UndoPreview? undoPreview;
+    private List<TimelinePoint> timeline = new();
+    private HubConnection? hubConnection;
+    private string connectionStatus = "Connecting...";
+    private string? feedbackMessage;
+    private bool refreshing;
+
+    // Filter values live in AppState so they survive navigating away and back.
+    private string SearchText
+    {
+        get => State.SearchText;
+        set => State.SearchText = value;
+    }
+
+    private string SelectedCategory
+    {
+        get => State.SelectedCategory;
+        set => State.SelectedCategory = value;
+    }
+
+    private string SelectedAlertState
+    {
+        get => State.SelectedAlertState;
+        set => State.SelectedAlertState = value;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadEverythingAsync();
+
+        var apiBaseUrl = Config["ApiBaseUrl"] ?? "http://localhost:5189/";
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl($"{apiBaseUrl.TrimEnd('/')}/telemetryHub")
+            .WithAutomaticReconnect()
+            .Build();
+
+        hubConnection.On<TelemetryPacket<float>>("ReceiveTelemetry", _ => InvokeAsync(RefreshLiveAsync));
+
+        hubConnection.On<AlertEvent>("ReceiveAlert", _ =>
+            InvokeAsync(async () =>
+            {
+                await RefreshInsightsAsync();
+                StateHasChanged();
+            }));
+
+        hubConnection.On<DeviceCommandResult>("ReceiveCommandResult", result =>
+        {
+            State.AddCommandResult(result);
+            return InvokeAsync(async () =>
+            {
+                await RefreshInsightsAsync();
+                await RefreshUndoAsync();
+                StateHasChanged();
+            });
+        });
+
+        hubConnection.Reconnecting += _ => { connectionStatus = "Reconnecting..."; return InvokeAsync(StateHasChanged); };
+        hubConnection.Reconnected += _ => { connectionStatus = "Connected"; return InvokeAsync(StateHasChanged); };
+        hubConnection.Closed += _ => { connectionStatus = "Disconnected"; return InvokeAsync(StateHasChanged); };
+
+        try
+        {
+            await hubConnection.StartAsync();
+            connectionStatus = "Connected";
+        }
+        catch (Exception)
+        {
+            connectionStatus = "Could not reach the API";
+        }
+    }
+
+    private async Task LoadEverythingAsync()
+    {
+        await RefreshLiveAsync();
+        await RefreshInsightsAsync();
+        await RefreshUndoAsync();
+    }
+
+    private async Task RefreshLiveAsync()
+    {
+        if (refreshing) return;
+        refreshing = true;
+
+        try
+        {
+            var devicesTask = Api.GetDevicesAsync(State.SearchText, ParseCategory(), ParseAlertState());
+            var statsTask = Api.GetQueueStatsAsync();
+            var alertsTask = Api.GetActiveAlertsAsync();
+            await Task.WhenAll(devicesTask, statsTask, alertsTask);
+
+            devices = devicesTask.Result;
+            queueStats = statsTask.Result;
+            alerts = alertsTask.Result;
+
+            if (State.SelectedDeviceId is Guid selectedId)
+            {
+                timeline = await Api.GetTimelineAsync(selectedId);
+            }
+        }
+        catch (HttpRequestException)
+        {
+            // API briefly unavailable: keep showing the last data.
+        }
+        finally
+        {
+            refreshing = false;
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task RefreshInsightsAsync()
+    {
+        try { insights = await Api.GetInsightsAsync(); }
+        catch (HttpRequestException) { }
+    }
+
+    private async Task RefreshUndoAsync()
+    {
+        try { undoPreview = await Api.GetUndoPreviewAsync(); }
+        catch (HttpRequestException) { }
+    }
+
+    private async Task OnSearchChangedAsync()
+    {
+        await RefreshLiveAsync();
+
+        // Each deliberate search is logged so the engine can learn what follows an alert.
+        if (!string.IsNullOrWhiteSpace(State.SearchText))
+        {
+            await Api.RecordSearchAsync(State.SearchText.Trim());
+            await RefreshInsightsAsync();
+        }
+    }
+
+    private async Task SelectDeviceAsync(Guid sensorId)
+    {
+        State.SelectedDeviceId = sensorId;
+        timeline = await Api.GetTimelineAsync(sensorId);
+    }
+
+    private async Task SendCommandAsync(Guid sensorId, DeviceCommandType commandType)
+    {
+        var response = await Api.SendCommandAsync(new DeviceCommandRequest(sensorId, commandType));
+        feedbackMessage = response.IsSuccessStatusCode ? $"{commandType} queued." : "The command could not be queued.";
+    }
+
+    private async Task ApplySuggestionAsync(Suggestion suggestion)
+    {
+        if (suggestion.Command is not null)
+        {
+            await SendCommandAsync(suggestion.Command.SensorId, suggestion.Command.CommandType);
+        }
+        else if (!string.IsNullOrWhiteSpace(suggestion.SearchText))
+        {
+            State.SearchText = suggestion.SearchText;
+            await OnSearchChangedAsync();
+        }
+    }
+
+    private async Task UndoAsync()
+    {
+        var response = await Api.UndoLastCommandAsync();
+        feedbackMessage = response.IsSuccessStatusCode ? "Last command undone." : "Nothing to undo.";
+        await RefreshUndoAsync();
+        await RefreshLiveAsync();
+    }
+
+    private SensorCategory? ParseCategory() =>
+        Enum.TryParse<SensorCategory>(State.SelectedCategory, out var category) ? category : null;
+
+    private AnomalyStatus? ParseAlertState() =>
+        Enum.TryParse<AnomalyStatus>(State.SelectedAlertState, out var status) ? status : null;
+
+    private string UndoText() =>
+        undoPreview is { Available: true } ? $"Next undo: {undoPreview.Description} ({undoPreview.Depth} on the stack)" : "Nothing to undo";
+
+    private static string ConfidenceText(Suggestion suggestion) =>
+        $"{(int)Math.Round(suggestion.Confidence * 100)}% confidence";
+
+    private static string FormatValue(DeviceState device) =>
+        device.LastStatus == AnomalyStatus.Disconnected
+            ? "--"
+            : $"{device.LastValue.ToString("F2", CultureInfo.InvariantCulture)} {device.LastUnit}";
+
+    private string SelectedClass(DeviceState device) =>
+        State.SelectedDeviceId == device.SensorId ? "selected" : string.Empty;
+
+    private string SelectedLabel() =>
+        devices?.FirstOrDefault(d => d.SensorId == State.SelectedDeviceId)?.MacAddress ?? "selected device";
+
+    private static string StatusClass(AnomalyStatus status) => status switch
+    {
+        AnomalyStatus.Spike => "status-spike",
+        AnomalyStatus.Disconnected => "status-disconnected",
+        _ => "status-normal"
+    };
+
+    // ---- Timeline chart helpers (plain SVG, no JavaScript library) ----
+
+    private static string F(double value) => value.ToString("F1", CultureInfo.InvariantCulture);
+
+    private static string MarkerStyle(AnomalyStatus status) =>
+        status == AnomalyStatus.Disconnected ? "fill: var(--danger-border);" : "fill: var(--warning-border);";
+
+    private List<(double X, double Y, AnomalyStatus Status)> ChartPoints()
+    {
+        var points = new List<(double X, double Y, AnomalyStatus Status)>();
+        if (timeline.Count < 2) return points;
+
+        var values = timeline.Where(p => p.Status != AnomalyStatus.Disconnected).Select(p => p.Value).ToList();
+        double min = values.Count > 0 ? values.Min() : 0;
+        double max = values.Count > 0 ? values.Max() : 1;
+        double range = Math.Max(max - min, 0.0001);
+
+        for (int i = 0; i < timeline.Count; i++)
+        {
+            var point = timeline[i];
+            double x = ChartPad + i * (ChartWidth - 2 * ChartPad) / (timeline.Count - 1);
+            double y = point.Status == AnomalyStatus.Disconnected
+                ? ChartHeight - ChartPad
+                : (ChartHeight - ChartPad) - (point.Value - min) / range * (ChartHeight - 2 * ChartPad);
+
+            points.Add((x, y, point.Status));
+        }
+
+        return points;
+    }
+
+    // A disconnect breaks the line, so the chart shows a gap rather than a false reading.
+    private List<string> ChartSegments()
+    {
+        var segments = new List<string>();
+        var current = new List<string>();
+
+        foreach (var point in ChartPoints())
+        {
+            if (point.Status == AnomalyStatus.Disconnected)
+            {
+                if (current.Count > 1) segments.Add(string.Join(" ", current));
+                current.Clear();
+                continue;
+            }
+
+            current.Add($"{F(point.X)},{F(point.Y)}");
+        }
+
+        if (current.Count > 1) segments.Add(string.Join(" ", current));
+        return segments;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+}

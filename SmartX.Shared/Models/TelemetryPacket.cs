@@ -7,7 +7,7 @@ namespace SmartX.Shared.Models
 {
     public class TelemetryPacket<T>
     {
-        public Guid sensorId { get; set; }
+        public Guid SensorId { get; set; }
         public string MetricName { get; set; } = string.Empty;
         public T Value { get; set; } = default!;
         public string Unit { get; set; } = string.Empty;
@@ -34,7 +34,7 @@ namespace SmartX.Shared.Models
                 {
                     result.Add(new TelemetryPacket<T>
                     {
-                        sensorId = SensorId,
+                        SensorId = SensorId,
                         MetricName = metricName,
                         Value = batch[i],
                         Unit = unit,

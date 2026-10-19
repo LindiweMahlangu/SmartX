@@ -1,22 +1,36 @@
 ﻿using SmartX.Shared.Models;
 using System.Collections.Concurrent;
 
-namespace SmartX.API.Services
+namespace SmartX.API.Services;
+
+public class InMemorySensorRepository : ISensorRepository
 {
-    public class InMemorySensorRepository : ISensorRepository
+    private readonly Dictionary<string, SensorProfile> _byMac = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Guid, SensorProfile> _byId = new();
+    private readonly object _lock = new();
+
+    public SensorProfile Add(SensorProfile profile)
     {
-        private readonly ConcurrentDictionary<Guid, SensorProfile> _sensors = new();
-
-        public SensorProfile Add(SensorProfile profile)
+        lock (_lock)
         {
-            _sensors[profile.Id] = profile;
-            return profile;
+            _byId[profile.Id] = profile;
+            _byMac[profile.MacAddress] = profile;
         }
+        return profile;
+    }
 
-        public SensorProfile? Get(Guid id) =>
-            _sensors.TryGetValue(id, out var sensor) ? sensor : null;
+    public SensorProfile? Get(Guid id)
+    {
+        lock (_lock) { return _byId.TryGetValue(id, out var sensor) ? sensor : null; }
+    }
 
-        public IEnumerable<SensorProfile> GetAll() =>
-            _sensors.Values.OrderByDescending(s => s.RegisteredAt);
+    public SensorProfile? GetByMac(string macAddress)
+    {
+        lock (_lock) { return _byMac.TryGetValue(macAddress, out var sensor) ? sensor : null; }
+    }
+
+    public IEnumerable<SensorProfile> GetAll()
+    {
+        lock (_lock) { return _byId.Values.OrderByDescending(s => s.RegisteredAt).ToList(); }
     }
 }

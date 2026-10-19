@@ -1,27 +1,47 @@
 ﻿using Microsoft.AspNetCore.SignalR;
 using SmartX.API.Hubs;
-using SmartX.API.Services;
 using SmartX.Shared.Models;
-using System.Collections.Concurrent;
 
-namespace SmartX.Api.Services;
+namespace SmartX.API.Services;
 
 public class TelemetryIngestionService : ITelemetryIngestionService
 {
-    private readonly ConcurrentDictionary<Guid, List<TelemetryPacket<float>>> _history = new();
-    private readonly IHubContext<TelemetryHub> _hub;
-    private const int MaxHistoryPerSensor = 500;
     private const int BaselineWindow = 20;
     private const double SpikeZScoreThreshold = 3.0;
+    private const int MaxHistoryReturned = 500;
 
-    public TelemetryIngestionService(IHubContext<TelemetryHub> hub) => _hub = hub;
+    private readonly IHubContext<TelemetryHub> _hub;
+    private readonly IDeviceStateService _deviceState;
+    private readonly ISensorRepository _sensors;
+    private readonly ITelemetryQueueService _queue;
+    private readonly ITelemetryHistoryService _history;
+    private readonly IAlertTracker _alerts;
+    private readonly IRecommendationEngine _recommendations;
 
-    public async Task<List<TelemetryPacket<float>>> IngestBatchesAsync(TelemetryBatchRequest request)
+    public TelemetryIngestionService(
+        IHubContext<TelemetryHub> hub,
+        IDeviceStateService deviceState,
+        ISensorRepository sensors,
+        ITelemetryQueueService queue,
+        ITelemetryHistoryService history,
+        IAlertTracker alerts,
+        IRecommendationEngine recommendations)
     {
-        // Step 1: raw jagged array of historical batches (variable length per batch)
-        float[][] rawBatches = request.Batches;
+        _hub = hub;
+        _deviceState = deviceState;
+        _sensors = sensors;
+        _queue = queue;
+        _history = history;
+        _alerts = alerts;
+        _recommendations = recommendations;
+    }
 
-        // Step 2: flatten into the optimised List<T> collection
+    public Task<List<TelemetryPacket<float>>> IngestBatchesAsync(TelemetryBatchRequest request)
+    {
+        // Part 1 requirement kept: raw jagged array of batches -> flat List<T> of packets.
+        float[][] rawBatches = request.Batches;
+        var category = _sensors.Get(request.SensorId)?.Category ?? SensorCategory.Environmental;
+
         var flushedPackets = new List<TelemetryPacket<float>>();
         for (int batchIndex = 0; batchIndex < rawBatches.Length; batchIndex++)
         {
@@ -30,7 +50,7 @@ public class TelemetryIngestionService : ITelemetryIngestionService
             {
                 flushedPackets.Add(new TelemetryPacket<float>
                 {
-                    sensorId = request.SensorId,
+                    SensorId = request.SensorId,
                     MetricName = request.MetricName,
                     Unit = request.Unit,
                     Value = batch[i]
@@ -38,35 +58,65 @@ public class TelemetryIngestionService : ITelemetryIngestionService
             }
         }
 
-        // Step 3: anomaly detection against a rolling baseline
-        var sensorHistory = _history.GetOrAdd(request.SensorId, _ => new List<TelemetryPacket<float>>());
         foreach (var packet in flushedPackets)
         {
-            packet.Status = DetectAnomaly(sensorHistory, packet.Value);
-            sensorHistory.Add(packet);
+            _queue.Enqueue(packet, category);
         }
 
-        if (sensorHistory.Count > MaxHistoryPerSensor)
-            sensorHistory.RemoveRange(0, sensorHistory.Count - MaxHistoryPerSensor);
+        return Task.FromResult(flushedPackets);
+    }
 
-        // Step 4: push to connected dashboards in real time
-        foreach (var packet in flushedPackets)
-            await _hub.Clients.All.SendAsync("ReceiveTelemetry", packet);
+    public async Task ProcessPacketAsync(TelemetryPacket<float> packet, bool wasPriority)
+    {
+        var sensor = _sensors.Get(packet.SensorId);
 
-        return flushedPackets;
+        if (packet.Status != AnomalyStatus.Disconnected)
+        {
+            var recent = _history.GetRecentValues(packet.SensorId, BaselineWindow);
+            packet.Status = DetectAnomaly(recent, packet.Value);
+
+            // A reading critical enough for the priority queue is an anomaly by definition.
+            if (wasPriority && packet.Status == AnomalyStatus.Normal)
+            {
+                packet.Status = AnomalyStatus.Spike;
+            }
+        }
+
+        _history.Add(packet);                              // SortedDictionary
+        _deviceState.UpsertFromTelemetry(packet, sensor);  // latest state
+
+        if (packet.Status != AnomalyStatus.Normal)
+        {
+            _recommendations.RecordAnomaly(packet.SensorId, DateTime.UtcNow);
+        }
+
+        var mac = sensor?.MacAddress ?? "unknown";
+        var alert = _alerts.Evaluate(packet, mac, ConditionFor(sensor?.Category, packet, wasPriority)); // HashSet
+        if (alert is not null)
+        {
+            _recommendations.RecordTrigger(alert);
+            await _hub.Clients.All.SendAsync("ReceiveAlert", alert);
+        }
+
+        await _hub.Clients.All.SendAsync("ReceiveTelemetry", packet);
     }
 
     public List<TelemetryPacket<float>> GetHistory(Guid sensorId) =>
-        _history.TryGetValue(sensorId, out var list) ? list : new List<TelemetryPacket<float>>();
+        _history.GetTimeline(sensorId, MaxHistoryReturned).ToList();
 
-    private static AnomalyStatus DetectAnomaly(List<TelemetryPacket<float>> history, float value)
+    private static string ConditionFor(SensorCategory? category, TelemetryPacket<float> packet, bool wasPriority)
     {
-        if (history.Count < 5) return AnomalyStatus.Normal;
+        if (packet.Status == AnomalyStatus.Disconnected) return "Disconnected";
+        if (wasPriority) return category == SensorCategory.PowerConsumption ? "CriticalHigh" : "CriticalLow";
+        return "Spike";
+    }
 
-        var recentValues = history.Skip(Math.Max(0, history.Count - BaselineWindow))
-                                   .Select(p => (double)p.Value).ToList();
-        double mean = recentValues.Average();
-        double variance = recentValues.Sum(v => Math.Pow(v - mean, 2)) / recentValues.Count;
+    private static AnomalyStatus DetectAnomaly(IReadOnlyList<float> recent, float value)
+    {
+        if (recent.Count < 5) return AnomalyStatus.Normal;
+
+        double mean = recent.Average(v => (double)v);
+        double variance = recent.Sum(v => Math.Pow(v - mean, 2)) / recent.Count;
         double stdDev = Math.Sqrt(variance);
 
         if (stdDev < 0.0001) return AnomalyStatus.Normal;
