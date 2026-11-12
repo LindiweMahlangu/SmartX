@@ -44,8 +44,10 @@
             }
         </ul>
     }
+    <p class="form-warning">@uploadWarning</p>
     <button type="submit">Register Sensor</button>
 </EditForm>
+
 
 @if (!string.IsNullOrEmpty(statusMessage))
 {
@@ -69,6 +71,9 @@
     private IBrowserFile? selectedFile;
     private string? statusMessage;
     private List<string> validationErrors = new();
+    private const long MaxFileBytes = 20_000_000; // 20 MB
+    private string? uploadWarning;
+    public class MessagePayload { public string? Message { get; set; } }
 
     private void OnFileSelected(InputFileChangeEventArgs e) => selectedFile = e.File;
 
@@ -106,10 +111,15 @@
         if (selectedFile is not null && created is not null)
         {
             using var content = new MultipartFormDataContent();
-            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: 20_000_000);
-            var fileContent = new StreamContent(stream);
-            content.Add(fileContent, "file", selectedFile.Name);
-            await Api.UploadAttachmentAsync(created.Id, content);
+            await using var stream = selectedFile.OpenReadStream(maxAllowedSize: MaxFileBytes);
+            content.Add(new StreamContent(stream), "file", selectedFile.Name);
+
+            var upload = await Api.UploadAttachmentAsync(created.Id, content);
+            if (!upload.IsSuccessStatusCode)
+            {
+                var detail = await upload.Content.ReadFromJsonAsync<MessagePayload>(JsonDefaults.Options);
+                uploadWarning = $"The sensor was registered, but the file was not saved: {detail?.Message ?? upload.ReasonPhrase}";
+            }
         }
 
         statusMessage = $"Sensor {created?.MacAddress} registered successfully under {facilityName} -> {zoneName} -> {nodeName}.";

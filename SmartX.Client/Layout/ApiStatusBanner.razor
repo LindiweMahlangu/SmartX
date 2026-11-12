@@ -1,0 +1,44 @@
+﻿@implements IDisposable
+@inject ApiClient Api
+
+@if (!reachable)
+{
+    <div class="api-banner" role="alert">
+        <strong>Cannot reach the Smart-X API</strong> at <code>@Api.BaseAddress</code>.
+        <span>
+            Start <code>SmartX.API</code>, and check that <code>ApiBaseUrl</code> in
+            <code>wwwroot/appsettings.json</code> uses the same address and scheme (http or https).
+        </span>
+        <button type="button" @onclick="CheckAsync">Retry</button>
+    </div>
+}
+
+@code {
+    private bool reachable = true;
+    private readonly CancellationTokenSource cts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CheckAsync();
+        _ = WatchAsync(cts.Token);
+    }
+
+    private async Task CheckAsync() => reachable = await Api.IsApiReachableAsync();
+
+    private async Task WatchAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                var before = reachable;
+                await CheckAsync();
+                if (before != reachable) await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    public void Dispose() { cts.Cancel(); cts.Dispose(); }
+}

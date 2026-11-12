@@ -1,0 +1,87 @@
+﻿@implements IDisposable
+@inject ApiClient Api
+
+<section class="insights-panel">
+    <h3>Predicted failures and recommended actions</h3>
+    <p class="muted">Battery drain is projected forward, and every relay is tested by removing it from the graph and routing each sensor again.</p>
+
+    @if (error is not null)
+    {
+        <p class="form-error">@error</p>
+    }
+    else if (data is null)
+    {
+        <p><em>Analysing the mesh...</em></p>
+    }
+    else
+    {
+        <ul class="suggestion-list">
+            @foreach (var suggestion in data.Suggestions)
+            {
+                <li class="suggestion @suggestion.Level">@suggestion.Text</li>
+            }
+        </ul>
+
+        <table class="risk-table">
+            <thead>
+                <tr><th>Node</th><th>Battery</th><th>Time left</th><th>Sensors cut off if it fails</th><th>Extra route cost if it fails</th><th>Risk</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var risk in data.Risks)
+                {
+                    <tr>
+                        <td>@risk.Name</td>
+                        <td>@risk.BatteryPercent%</td>
+                        <td>@Duration(risk.MinutesToEmpty)</td>
+                        <td>@(risk.Kind == MeshNodeKind.Relay ? risk.SensorsCutOff.ToString() : "-")</td>
+                        <td>@(risk.Kind == MeshNodeKind.Relay ? risk.ExtraRouteCost.ToString() : "-")</td>
+                        <td><span class="risk-chip @risk.Level">@risk.Level</span></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        <p class="muted">@data.IsolatingPairs of @data.RelayPairs relay pairs would cut off every sensor if both failed.</p>
+    }
+</section>
+
+@code {
+    private MeshInsightsDto? data;
+    private string? error;
+    private readonly CancellationTokenSource cts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _ = PollAsync(cts.Token);
+    }
+
+    private async Task PollAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(6));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task LoadAsync()
+    {
+        try { data = await Api.GetMeshInsightsAsync(); error = null; }
+        catch (HttpRequestException) { error = "Could not load the analysis. Check that the API is running."; }
+    }
+
+    private static string Duration(int? minutes)
+    {
+        if (!minutes.HasValue) return "not draining";
+        if (minutes.Value < 60) return $"{minutes.Value} min";
+        return $"{minutes.Value / 60} h {minutes.Value % 60} min";
+    }
+
+    public void Dispose() { cts.Cancel(); cts.Dispose(); }
+}

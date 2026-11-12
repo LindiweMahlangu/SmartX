@@ -1,0 +1,107 @@
+﻿@page "/sensors"
+@inject ApiClient Api
+
+<a class="back-link" href="/sensor-menu"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+<h2>Registered Sensors</h2>
+<p class="muted">Every device known to the gateway, with the files attached to it. Click a file to download it.</p>
+
+@if (error is not null)
+{
+    <p class="form-error">@error</p>
+}
+else if (rows is null)
+{
+    <p><em>Loading sensors...</em></p>
+}
+else
+{
+    <div class="sensor-toolbar">
+        <input type="search" placeholder="Filter by MAC, category or location" @bind="filter" @bind:event="oninput" />
+        <button type="button" @onclick="LoadAsync">Refresh</button>
+        <a class="btn" href="/register">Register a sensor</a>
+    </div>
+
+    <table class="sensor-table">
+        <thead>
+            <tr><th>MAC address</th><th>Category</th><th>Location</th><th>Registered</th><th>Attached files</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var row in Filtered())
+            {
+                <tr>
+                    <td><code>@row.Sensor.MacAddress</code></td>
+                    <td>@row.Sensor.Category</td>
+                    <td>@LocationPath(row.Sensor.DeploymentLocation)</td>
+                    <td>@row.Sensor.RegisteredAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                    <td>
+                        @if (row.Files.Count == 0)
+                        {
+                            <span class="muted">None</span>
+                        }
+                        else
+                        {
+                            <ul class="file-list">
+                                @foreach (var file in row.Files)
+                                {
+                                    <li>
+                                        <a href="@Api.AttachmentUrl(row.Sensor.Id, file.FileName)" download="@file.DisplayName">@file.DisplayName</a>
+                                        <span class="muted">(@FormatSize(file.SizeBytes))</span>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private sealed record Row(SensorProfile Sensor, List<AttachmentInfo> Files);
+
+    private List<Row>? rows;
+    private string? error;
+    private string filter = string.Empty;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var sensors = await Api.GetSensorsAsync();
+            var fileLists = await Task.WhenAll(sensors.Select(s => Api.GetAttachmentsAsync(s.Id)));
+            rows = sensors.Select((sensor, index) => new Row(sensor, fileLists[index])).ToList();
+            error = null;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Could not load sensors. Check that the API is running.";
+        }
+    }
+
+    private IEnumerable<Row> Filtered()
+    {
+        if (rows is null) return Enumerable.Empty<Row>();
+        if (string.IsNullOrWhiteSpace(filter)) return rows;
+
+        var text = filter.Trim();
+        return rows.Where(r =>
+            r.Sensor.MacAddress.Contains(text, StringComparison.OrdinalIgnoreCase) ||
+            r.Sensor.Category.ToString().Contains(text, StringComparison.OrdinalIgnoreCase) ||
+            LocationPath(r.Sensor.DeploymentLocation).Contains(text, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The deployment location is a tree, so the path is built by recursion.
+    private static string LocationPath(DeploymentNode node) =>
+        node.Children.Count == 0 ? node.Name : $"{node.Name} > {LocationPath(node.Children[0])}";
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
+        _ => $"{bytes / (1024.0 * 1024.0):F1} MB"
+    };
+}

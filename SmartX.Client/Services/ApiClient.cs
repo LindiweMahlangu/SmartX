@@ -1,5 +1,6 @@
 ﻿using System.Net.Http.Json;
 using SmartX.Shared.Models;
+using System.Globalization;
 
 namespace SmartX.Client.Services;
 
@@ -65,4 +66,42 @@ public class ApiClient
 
     public async Task<List<TimelinePoint>> GetTimelineAsync(Guid sensorId, int take = 60) =>
         await _http.GetFromJsonAsync<List<TimelinePoint>>($"api/devices/{sensorId}/timeline?take={take}", JsonDefaults.Options) ?? new();
+
+    // ---- Part 3: mesh network ----
+    public Task<MeshTopologyDto?> GetMeshTopologyAsync() =>
+        _http.GetFromJsonAsync<MeshTopologyDto>("api/mesh/topology", JsonDefaults.Options);
+
+    public Task<RouteResultDto?> GetRouteAsync(string mac) =>
+        _http.GetFromJsonAsync<RouteResultDto>($"api/mesh/route?mac={Uri.EscapeDataString(mac)}", JsonDefaults.Options);
+
+    public Task<HttpResponseMessage> SetNodeFailedAsync(string mac, bool failed) =>
+        _http.PostAsync($"api/mesh/{(failed ? "fail" : "restore")}?mac={Uri.EscapeDataString(mac)}", null);
+
+    public Task<HistoryQueryResult?> GetHistoryAsync(string mac, DateTime fromUtc, DateTime toUtc, int take, bool newestFirst)
+    {
+        var from = Uri.EscapeDataString(fromUtc.ToString("o", CultureInfo.InvariantCulture));
+        var to = Uri.EscapeDataString(toUtc.ToString("o", CultureInfo.InvariantCulture));
+        var url = $"api/mesh/history?mac={Uri.EscapeDataString(mac)}&fromUtc={from}&toUtc={to}&take={take}&newestFirst={newestFirst.ToString().ToLowerInvariant()}";
+        return _http.GetFromJsonAsync<HistoryQueryResult>(url, JsonDefaults.Options);
+    }
+    public string BaseAddress => _http.BaseAddress?.ToString() ?? "(not set)";
+
+    public async Task<bool> IsApiReachableAsync()
+    {
+        try
+        {
+            using var response = await _http.GetAsync("api/health");
+            return response.IsSuccessStatusCode;
+        }
+        catch (HttpRequestException) { return false; }
+        catch (TaskCanceledException) { return false; }
+    }
+    public async Task<List<AttachmentInfo>> GetAttachmentsAsync(Guid sensorId) =>
+    await _http.GetFromJsonAsync<List<AttachmentInfo>>($"api/sensors/{sensorId}/attachments", JsonDefaults.Options) ?? new();
+
+    public string AttachmentUrl(Guid sensorId, string storedFileName) =>
+        new Uri(_http.BaseAddress!, $"api/sensors/{sensorId}/attachments/{Uri.EscapeDataString(storedFileName)}").ToString();
+
+    public Task<MeshInsightsDto?> GetMeshInsightsAsync() =>
+    _http.GetFromJsonAsync<MeshInsightsDto>("api/mesh/insights", JsonDefaults.Options);
 }

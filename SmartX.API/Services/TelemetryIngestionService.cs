@@ -17,6 +17,7 @@ public class TelemetryIngestionService : ITelemetryIngestionService
     private readonly ITelemetryHistoryService _history;
     private readonly IAlertTracker _alerts;
     private readonly IRecommendationEngine _recommendations;
+    private readonly ITelemetryArchive _archive;
 
     public TelemetryIngestionService(
         IHubContext<TelemetryHub> hub,
@@ -25,7 +26,8 @@ public class TelemetryIngestionService : ITelemetryIngestionService
         ITelemetryQueueService queue,
         ITelemetryHistoryService history,
         IAlertTracker alerts,
-        IRecommendationEngine recommendations)
+        IRecommendationEngine recommendations,
+        ITelemetryArchive archive)
     {
         _hub = hub;
         _deviceState = deviceState;
@@ -34,6 +36,7 @@ public class TelemetryIngestionService : ITelemetryIngestionService
         _history = history;
         _alerts = alerts;
         _recommendations = recommendations;
+        _archive = archive;
     }
 
     public Task<List<TelemetryPacket<float>>> IngestBatchesAsync(TelemetryBatchRequest request)
@@ -82,7 +85,8 @@ public class TelemetryIngestionService : ITelemetryIngestionService
             }
         }
 
-        _history.Add(packet);                              // SortedDictionary
+        _history.Add(packet);  // SortedDictionary
+        _archive.Add(packet);   // 4. AVL tree: long-term, time-range queryable history
         _deviceState.UpsertFromTelemetry(packet, sensor);  // latest state
 
         if (packet.Status != AnomalyStatus.Normal)

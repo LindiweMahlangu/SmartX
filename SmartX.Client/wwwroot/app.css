@@ -398,3 +398,62 @@ button[type="submit"], button {
     padding: 0.3rem 0.7rem;
     font-size: 12px;
 }
+
+.mesh-svg {
+    width: 100%;
+    max-width: 760px;
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: 12px;
+}
+
+.mesh-cost {
+    font-size: 10px;
+    fill: var(--text-secondary);
+    text-anchor: middle;
+}
+
+.mesh-label {
+    font-size: 11px;
+    fill: var(--text-primary);
+    text-anchor: middle;
+}
+
+.mesh-glyph {
+    font-size: 10px;
+    font-weight: 600;
+    fill: var(--text-primary);
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+.log-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+    .log-table th {
+        position: sticky;
+        top: 0;
+        background: var(--surface-muted);
+        text-align: left;
+        padding: 6px 10px;
+        font-weight: 500;
+    }
+
+    .log-table td {
+        padding: 6px 10px;
+        border-bottom: 0.5px solid var(--border);
+    }
+
+    .log-table tr.row-spike td {
+        background: var(--warning-bg);
+        color: var(--warning-text);
+    }
+
+    .log-table tr.row-disconnected td {
+        background: var(--danger-bg);
+        color: var(--danger-text);
+    }

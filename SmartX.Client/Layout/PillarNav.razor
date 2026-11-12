@@ -1,0 +1,63 @@
+﻿@implements IDisposable
+@inject ApiClient Api
+@inject NavigationManager Nav
+
+<nav class="pillar-nav" aria-label="Main navigation">
+    <a href="/" class="pillar-link @ActiveClass(IsHome())" aria-current="@CurrentValue(IsHome())">Home</a>
+
+    @foreach (var pillar in pillars)
+    {
+        var active = IsActive(pillar.Route);
+
+        if (pillar.Enabled)
+        {
+            <a href="@pillar.Route" class="pillar-link @ActiveClass(active)" aria-current="@CurrentValue(active)">@pillar.Title</a>
+        }
+        else
+        {
+            <span class="pillar-link disabled" aria-disabled="true" title="Coming soon">@pillar.Title</span>
+        }
+    }
+</nav>
+
+@code {
+    // Which pages belong to which pillar, so a sub-page keeps its pillar highlighted.
+    private static readonly Dictionary<string, string[]> Sections = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["/sensor-menu"] = new[] { "/sensor-menu", "/dashboard", "/register", "/meters", "/sensors" },
+        ["/command-stream"] = new[] { "/command-stream" },
+        ["/network-topology"] = new[] { "/network-topology" }
+    };
+
+    private List<MenuPillar> pillars = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        Nav.LocationChanged += OnLocationChanged;
+        try { pillars = await Api.GetMenuAsync(); }
+        catch (HttpRequestException) { pillars = new(); }   // the banner explains the problem
+    }
+
+    private string CurrentPath() =>
+        "/" + Nav.ToBaseRelativePath(Nav.Uri).Split('?', '#')[0].Trim('/');
+
+    private bool IsHome() => CurrentPath() == "/";
+
+    private bool IsActive(string pillarRoute)
+    {
+        var path = CurrentPath();
+        var routes = Sections.TryGetValue(pillarRoute, out var owned) ? owned : new[] { pillarRoute };
+
+        return routes.Any(route =>
+            path.Equals(route, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(route + "/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string ActiveClass(bool active) => active ? "active" : string.Empty;
+    private static string? CurrentValue(bool active) => active ? "page" : null;
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) =>
+        InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Nav.LocationChanged -= OnLocationChanged;
+}

@@ -3,7 +3,7 @@
 @using System.Globalization
 @using Microsoft.AspNetCore.SignalR.Client
 @inject ApiClient Api
-@inject IConfiguration Config
+@inject ApiEndpoint Endpoint
 @inject AppState State
 
 <a class="back-link" href="/"><i class="ti ti-arrow-left"></i> Back to menu</a>
@@ -212,11 +212,10 @@ else
     {
         await LoadEverythingAsync();
 
-        var apiBaseUrl = Config["ApiBaseUrl"] ?? "http://localhost:5189/";
         hubConnection = new HubConnectionBuilder()
-            .WithUrl($"{apiBaseUrl.TrimEnd('/')}/telemetryHub")
-            .WithAutomaticReconnect()
-            .Build();
+      .WithUrl(Endpoint.HubUrl)      
+      .WithAutomaticReconnect()
+      .Build();
 
         hubConnection.On<TelemetryPacket<float>>("ReceiveTelemetry", _ => InvokeAsync(RefreshLiveAsync));
 

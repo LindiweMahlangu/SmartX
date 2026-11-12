@@ -1,7 +1,7 @@
 ﻿@page "/dashboard"
 @implements IAsyncDisposable
 @using Microsoft.AspNetCore.SignalR.Client
-@inject IConfiguration Config
+@inject ApiEndpoint Endpoint
 
 <a class="back-link" href="/sensor-menu"><i class="ti ti-arrow-left"></i> Back to menu</a>
 
@@ -28,12 +28,10 @@
 
     protected override async Task OnInitializedAsync()
     {
-        var apiBaseUrl = Config["ApiBaseUrl"] ?? "http://localhost:5189/";
-
         hubConnection = new HubConnectionBuilder()
-            .WithUrl($"{apiBaseUrl.TrimEnd('/')}/telemetryHub")
-            .WithAutomaticReconnect()
-            .Build();
+     .WithUrl(Endpoint.HubUrl)     
+     .WithAutomaticReconnect()
+     .Build();
 
         hubConnection.On<TelemetryPacket<float>>("ReceiveTelemetry", packet =>
         {

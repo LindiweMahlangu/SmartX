@@ -10,6 +10,9 @@ public class AppState
     public string SelectedCategory { get; set; } = string.Empty;
     public string SelectedAlertState { get; set; } = string.Empty;
     public Guid? SelectedDeviceId { get; set; }
+    // Network Topology page
+    public string MeshSelectedMac { get; set; } = string.Empty;
+    public bool MeshShowSpanningTree { get; set; } = true;
 
     public List<DeviceCommandResult> CommandLog { get; } = new();
 

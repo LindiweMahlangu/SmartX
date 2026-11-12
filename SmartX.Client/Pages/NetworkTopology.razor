@@ -1,0 +1,504 @@
+﻿@page "/network-topology"
+@implements IDisposable
+@using System.Globalization
+@inject ApiClient Api
+@inject AppState State
+
+<a class="back-link" href="/"><i class="ti ti-arrow-left"></i> Back to menu</a>
+
+<h2>Network Topology &amp; Mesh Routing</h2>
+<p class="muted">The mesh refreshes every few seconds. Click a node, or pick one below, to trace its route to the gateway.</p>
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <p style="color: var(--danger-text); font-size: 13px;">@errorMessage</p>
+}
+
+@if (topology is null)
+{
+    <p><em>Loading the mesh...</em></p>
+}
+else
+{
+    <div class="metric-strip">
+        <div class="metric"><span>Nodes online</span><strong>@OnlineCount / @topology.Nodes.Count</strong></div>
+        <div class="metric"><span>Cut-off nodes</span><strong>@topology.IsolatedNodeIds.Count</strong></div>
+        <div class="metric"><span>Spanning tree cost</span><strong>@topology.SpanningTreeCost</strong></div>
+        <div class="metric"><span>Selected route cost</span><strong>@RouteCostText()</strong></div>
+    </div>
+
+    <div class="filters">
+        <div>
+            <label>Track a node (MAC address)</label>
+            <select @bind="SelectedMac" @bind:after="OnSelectedChangedAsync">
+                @foreach (var node in topology.Nodes.Where(n => n.Kind != MeshNodeKind.Gateway))
+                {
+                    <option value="@node.Id">@node.Name (@node.Id)</option>
+                }
+            </select>
+        </div>
+        <div>
+            <label><input type="checkbox" @bind="ShowSpanningTree" style="min-width: 0;" /> Show minimum spanning tree</label>
+        </div>
+    </div>
+
+    @if (SelectedNode is not null)
+    {
+        <div class="action-bar">
+            @if (SelectedNode.IsFailed)
+            {
+                <button @onclick="() => SetFailedAsync(false)">Restore @SelectedNode.Name</button>
+            }
+            else
+            {
+                <button @onclick="() => SetFailedAsync(true)">Simulate failure of @SelectedNode.Name</button>
+            }
+            <span class="muted">Fail a relay and watch the route change. That is the mesh healing itself.</span>
+        </div>
+    }
+
+    <svg viewBox="0 0 640 360" class="mesh-svg">
+        @foreach (var link in topology.Links)
+        {
+            var a = NodeById(link.From);
+            var b = NodeById(link.To);
+            if (a is null || b is null) continue;
+
+            <g>
+                <line x1="@F(a.X)" y1="@F(a.Y)" x2="@F(b.X)" y2="@F(b.Y)" style="@LinkStyle(link)" />
+                <text x="@F((a.X + b.X) / 2)" y="@F((a.Y + b.Y) / 2 - 4)" class="mesh-cost">@link.Cost</text>
+            </g>
+        }
+
+        @foreach (var node in topology.Nodes)
+        {
+            <g style="cursor: pointer;" @onclick="() => SelectNodeAsync(node.Id)">
+                <circle cx="@F(node.X)" cy="@F(node.Y)" r="@Radius(node)" style="@NodeStyle(node)" />
+                <text x="@F(node.X)" y="@F(node.Y + 4)" class="mesh-glyph">@Glyph(node)</text>
+                <text x="@F(node.X)" y="@F(node.Y + 32)" class="mesh-label">@node.Name</text>
+            </g>
+        }
+    </svg>
+
+    <p class="muted">
+        Numbers on the links are costs (lower is better). Green line: the selected node's cheapest route.
+        Blue line: spanning-tree backbone. Dashed red: link down. Red node: offline. Amber node: online but cut off from the gateway.
+    </p>
+
+    <div class="panel-grid">
+        <div class="panel">
+            <h3><i class="ti ti-route"></i> Route to the gateway</h3>
+            @if (route is null)
+            {
+                <p class="muted">Select a node to trace its route.</p>
+            }
+            else if (!route.Found)
+            {
+                <p style="color: var(--danger-text); font-size: 13px;">@route.Message</p>
+            }
+            else
+            {
+                <p style="font-size: 13px; margin: 0 0 4px;"><strong>Lowest cost</strong> (Dijkstra): @(string.Join(" → ", route.PathNames))</p>
+                <p class="muted">Cost @route.TotalCost, @route.Hops hops</p>
+                <p style="font-size: 13px; margin: 10px 0 4px;"><strong>Fewest hops</strong> (breadth-first): @(string.Join(" → ", route.FewestHopsNames))</p>
+                <p class="muted">Cost @route.FewestHopsCost, @(route.FewestHopsPath.Count - 1) hops</p>
+            }
+        </div>
+
+        <div class="panel">
+            <h3><i class="ti ti-battery-1"></i> Low-battery watchlist</h3>
+            @foreach (var node in topology.LowBatteryWatchlist)
+            {
+                <div class="suggestion">
+                    <div>
+                        <strong>@node.Name</strong>
+                        <div class="muted">@node.Id</div>
+                    </div>
+                    <span style="font-size: 13px; font-weight: 500;">@node.BatteryPercent%</span>
+                </div>
+            }
+            <p class="muted" style="margin-top: 8px;">Weakest batteries first, picked with a min-heap.</p>
+        </div>
+    </div>
+
+    @if (SelectedNode?.Kind == MeshNodeKind.Sensor)
+    {
+        <h3 style="margin-top: 1.5rem;">Telemetry history: @SelectedNode.Name</h3>
+
+        <div class="filters">
+            <div>
+                <label>From</label>
+                <input type="datetime-local" @bind="fromLocal" />
+            </div>
+            <div>
+                <label>To</label>
+                <input type="datetime-local" @bind="toLocal" />
+            </div>
+            <div>
+                <label>Rows</label>
+                <select @bind="take">
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                </select>
+            </div>
+            <div>
+                <label>Order</label>
+                <select @bind="newestFirst">
+                    <option value="true">Newest first</option>
+                    <option value="false">Oldest first</option>
+                </select>
+            </div>
+            <button @onclick="RunQueryAsync">Run query</button>
+        </div>
+
+        <div class="action-bar">
+            <span class="muted">Quick ranges:</span>
+            <button @onclick="() => SetRangeAsync(1)">Last hour</button>
+            <button @onclick="() => SetRangeAsync(2)">Last 2 hours</button>
+            <button @onclick="() => SetRangeAsync(6)">Last 6 hours</button>
+            <button @onclick="() => SetRangeAsync(24)">Last 24 hours</button>
+            <button @onclick="() => SetDailyWindowAsync(14, 16)">14:00 to 16:00</button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(queryMessage))
+        {
+            <p style="color: var(--danger-text); font-size: 13px;">@queryMessage</p>
+        }
+
+        @if (history is not null)
+        {
+            <div class="metric-strip">
+                <div class="metric"><span>Readings in range</span><strong>@history.TotalMatches</strong></div>
+                <div class="metric"><span>Showing</span><strong>@history.Entries.Count</strong></div>
+                <div class="metric"><span>Lowest</span><strong>@Stat(history.Min, history.Unit)</strong></div>
+                <div class="metric"><span>Highest</span><strong>@Stat(history.Max, history.Unit)</strong></div>
+                <div class="metric"><span>Average</span><strong>@Stat(history.Average, history.Unit)</strong></div>
+            </div>
+
+            <p class="muted">
+                The AVL tree holds @history.TreeSize readings (height @history.TreeHeight). This query touched only
+                @history.NodesVisited nodes instead of scanning all of them.
+            </p>
+
+            @if (history.Entries.Count == 0)
+            {
+                <p>No readings in that time range.</p>
+            }
+            else
+            {
+                <div style="max-height: 360px; overflow: auto;">
+                    <table class="log-table">
+                        <thead>
+                            <tr><th>Time</th><th>Reading</th><th>Status</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var entry in history.Entries)
+                            {
+                                <tr class="@RowClass(entry.Status)">
+                                    <td>@entry.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                                    <td>@FormatReading(entry, history.Unit)</td>
+                                    <td>@entry.Status</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+}
+
+<MeshInsightsPanel />
+
+@code {
+    private MeshTopologyDto? topology;
+    private RouteResultDto? route;
+    private HistoryQueryResult? history;
+    private string? errorMessage;
+    private string? queryMessage;
+    private bool disposed;
+
+    private readonly HashSet<string> routeEdgeKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> routeNodeIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource cts = new();
+
+    // History query controls (local time, as the user sees it).
+    private DateTime fromLocal = DateTime.Now.AddHours(-2);
+    private DateTime toLocal = DateTime.Now;
+    private int take = 100;
+    private bool newestFirst = true;
+
+    // Kept in AppState so the choice survives navigating away and back.
+    private string SelectedMac
+    {
+        get => State.MeshSelectedMac;
+        set => State.MeshSelectedMac = value;
+    }
+
+    private bool ShowSpanningTree
+    {
+        get => State.MeshShowSpanningTree;
+        set => State.MeshShowSpanningTree = value;
+    }
+
+    private MeshNodeDto? SelectedNode => NodeById(State.MeshSelectedMac);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAsync();
+
+        if (SelectedNode?.Kind == MeshNodeKind.Sensor)
+        {
+            await RunQueryAsync();
+        }
+
+        _ = PollAsync(cts.Token);
+    }
+
+            // The most recent finished window of the day, for example 14:00 to 16:00.
+    private async Task SetRangeAsync(int hours)
+    {
+        toLocal = DateTime.Now;
+        fromLocal = toLocal.AddHours(-hours);
+        await RunQueryAsync();
+    }
+
+    // The most recent finished window of the day, for example 14:00 to 16:00.
+    private async Task SetDailyWindowAsync(int startHour, int endHour)
+    {
+        var end = DateTime.Today.AddHours(endHour);
+        if (end > DateTime.Now)
+        {
+            end = end.AddDays(-1); // today's window has not finished yet, use yesterday's
+        }
+
+        toLocal = end;
+        fromLocal = end.AddHours(-(endHour - startHour));
+        await RunQueryAsync();
+    }
+
+    
+    
+
+    private async Task PollAsync(CancellationToken token)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(4));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (disposed) return;
+                    await RefreshAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The page was closed.
+        }
+    }
+
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            topology = await Api.GetMeshTopologyAsync();
+
+            if (topology is not null)
+            {
+                if (SelectedNode is null)
+                {
+                    State.MeshSelectedMac = topology.Nodes.FirstOrDefault(n => n.Kind == MeshNodeKind.Sensor)?.Id ?? string.Empty;
+                }
+
+                if (!string.IsNullOrEmpty(State.MeshSelectedMac))
+                {
+                    route = await Api.GetRouteAsync(State.MeshSelectedMac);
+                    BuildRouteHighlight();
+                }
+            }
+
+            errorMessage = null;
+        }
+        catch (HttpRequestException)
+        {
+            errorMessage = "Could not reach the API. Showing the last known mesh.";
+        }
+    }
+
+    private void BuildRouteHighlight()
+    {
+        routeEdgeKeys.Clear();
+        routeNodeIds.Clear();
+
+        if (route is { Found: true })
+        {
+            foreach (var id in route.Path)
+            {
+                routeNodeIds.Add(id);
+            }
+
+            for (int i = 0; i + 1 < route.Path.Count; i++)
+            {
+                routeEdgeKeys.Add(EdgeKey(route.Path[i], route.Path[i + 1]));
+            }
+        }
+    }
+
+    private async Task OnSelectedChangedAsync()
+    {
+        history = null;
+        await RefreshAsync();
+
+        if (SelectedNode?.Kind == MeshNodeKind.Sensor)
+        {
+            await RunQueryAsync();
+        }
+    }
+
+    private async Task SelectNodeAsync(string id)
+    {
+        if (string.Equals(id, GatewayNodeId(), StringComparison.OrdinalIgnoreCase)) return;
+
+        State.MeshSelectedMac = id;
+        await OnSelectedChangedAsync();
+    }
+
+    private string GatewayNodeId() =>
+        topology?.Nodes.FirstOrDefault(n => n.Kind == MeshNodeKind.Gateway)?.Id ?? string.Empty;
+
+    private async Task SetFailedAsync(bool failed)
+    {
+        if (SelectedNode is null) return;
+
+        await Api.SetNodeFailedAsync(SelectedNode.Id, failed);
+        await RefreshAsync();
+    }
+
+  
+
+    private async Task RunQueryAsync()
+    {
+        if (SelectedNode is null) return;
+
+        if (fromLocal >= toLocal)
+        {
+            queryMessage = "The From time must be earlier than the To time.";
+            return;
+        }
+
+        try
+        {
+            var fromUtc = new DateTimeOffset(DateTime.SpecifyKind(fromLocal, DateTimeKind.Local)).UtcDateTime;
+            var toUtc = new DateTimeOffset(DateTime.SpecifyKind(toLocal, DateTimeKind.Local)).UtcDateTime;
+
+            history = await Api.GetHistoryAsync(SelectedNode.Id, fromUtc, toUtc, take, newestFirst);
+            queryMessage = null;
+        }
+        catch (HttpRequestException)
+        {
+            queryMessage = "The history query failed. Check that the API is running.";
+        }
+    }
+
+    // ---- display helpers ----
+
+    private MeshNodeDto? NodeById(string id) =>
+        topology?.Nodes.FirstOrDefault(n => string.Equals(n.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    private static string EdgeKey(string a, string b) =>
+        string.Compare(a, b, StringComparison.OrdinalIgnoreCase) <= 0 ? $"{a}|{b}" : $"{b}|{a}";
+
+    private static string F(double value) => value.ToString("F1", CultureInfo.InvariantCulture);
+
+    private string LinkStyle(MeshLinkDto link)
+    {
+        if (!link.IsOnline)
+        {
+            return "stroke: var(--danger-border); stroke-width: 2; stroke-dasharray: 5 5; opacity: 0.7;";
+        }
+
+        if (routeEdgeKeys.Contains(EdgeKey(link.From, link.To)))
+        {
+            return "stroke: var(--success-border); stroke-width: 6;";
+        }
+
+        if (ShowSpanningTree && link.InSpanningTree)
+        {
+            return "stroke: var(--accent-border); stroke-width: 4;";
+        }
+
+        return "stroke: var(--border-strong); stroke-width: 1.5;";
+    }
+
+    private string NodeStyle(MeshNodeDto node)
+    {
+        string fill, stroke;
+
+        if (!node.IsOnline)
+        {
+            fill = "var(--danger-bg)"; stroke = "var(--danger-border)";
+        }
+        else if (node.Kind == MeshNodeKind.Gateway)
+        {
+            fill = "var(--accent)"; stroke = "var(--accent)";
+        }
+        else if (!node.Reachable)
+        {
+            fill = "var(--warning-bg)"; stroke = "var(--warning-border)";
+        }
+        else if (node.Kind == MeshNodeKind.Sensor)
+        {
+            fill = "var(--success-bg)"; stroke = "var(--success-border)";
+        }
+        else
+        {
+            fill = "var(--accent-bg)"; stroke = "var(--accent-border)";
+        }
+
+        bool selected = string.Equals(node.Id, State.MeshSelectedMac, StringComparison.OrdinalIgnoreCase);
+        string width = selected ? "4" : routeNodeIds.Contains(node.Id) ? "3" : "1.5";
+
+        return $"fill: {fill}; stroke: {stroke}; stroke-width: {width};";
+    }
+
+    private int OnlineCount => topology?.Nodes.Count(n => n.IsOnline) ?? 0;
+
+    private string RouteCostText() => route is { Found: true } ? route.TotalCost.ToString() : "-";
+
+    private static string Radius(MeshNodeDto node) => node.Kind == MeshNodeKind.Gateway ? "20" : "15";
+
+    private static string Glyph(MeshNodeDto node) => node.Kind switch
+    {
+        MeshNodeKind.Gateway => "GW",
+        MeshNodeKind.Relay => "R",
+        _ => "S"
+    };
+
+    private static string Stat(float? value, string unit) =>
+        value.HasValue ? $"{value.Value.ToString("F1", CultureInfo.InvariantCulture)} {unit}" : "-";
+
+    private static string FormatReading(HistoryEntry entry, string unit) =>
+        entry.Status == AnomalyStatus.Disconnected
+            ? "--"
+            : $"{entry.Value.ToString("F2", CultureInfo.InvariantCulture)} {unit}";
+
+    private static string RowClass(AnomalyStatus status) => status switch
+    {
+        AnomalyStatus.Spike => "row-spike",
+        AnomalyStatus.Disconnected => "row-disconnected",
+        _ => "row-normal"
+    };
+
+    public void Dispose()
+    {
+        disposed = true;
+        cts.Cancel();
+        cts.Dispose();
+    }
+}

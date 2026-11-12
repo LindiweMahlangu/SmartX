@@ -14,18 +14,29 @@ public class TelemetrySimulatorService : BackgroundService
 
     private readonly Dictionary<Guid, int> _offlineTicks = new();
     private readonly Dictionary<Guid, int> _criticalTicks = new();
+    private readonly ITelemetryArchive _archive;
+
+    private readonly ServerAddressResolver _addresses;
+    private readonly IHostApplicationLifetime _lifetime;
+    // constructor gets:  ServerAddressResolver addresses, IHostApplicationLifetime lifetime
+    // and stores them:   _addresses = addresses; _lifetime = lifetime
 
     public TelemetrySimulatorService(
         IHttpClientFactory httpFactory,
         ISensorRepository sensors,
         IRecommendationEngine recommendations,
-        ILogger<TelemetrySimulatorService> logger)
+        ITelemetryArchive archive,
+        ILogger<TelemetrySimulatorService> logger,
+        ServerAddressResolver addresses,
+        IHostApplicationLifetime lifetime)
     {
         _httpFactory = httpFactory;
         _sensors = sensors;
         _recommendations = recommendations;
         _logger = logger;
-
+        _archive = archive;
+        _addresses = addresses;    
+        _lifetime = lifetime;
         SeedDemoSensors();
     }
 
@@ -40,6 +51,63 @@ public class TelemetrySimulatorService : BackgroundService
         var pump = _sensors.Add(new SensorProfile { MacAddress = "AA:BB:CC:DD:EE:03", Category = SensorCategory.Actuator, DeploymentLocation = facility });
 
         SeedOperatorHistory(moisture, power, pump);
+
+        foreach (var sensor in new[] { moisture, power, pump })
+        {
+            SeedHistory(sensor);
+        }
+    }
+
+    // 24 hours of one-reading-per-minute history.
+    private void SeedHistory(SensorProfile sensor)
+    {
+        var now = DateTime.UtcNow;
+        var packets = new List<TelemetryPacket<float>>();
+
+        for (int minutesAgo = 24 * 60; minutesAgo >= 1; minutesAgo--)
+        {
+            var at = now.AddMinutes(-minutesAgo);
+            var value = HistoricalValue(sensor.Category, at, out var status);
+
+            packets.Add(new TelemetryPacket<float>
+            {
+                SensorId = sensor.Id,
+                MetricName = MetricNameFor(sensor.Category),
+                Unit = UnitFor(sensor.Category),
+                Value = value,
+                Timestamp = at,
+                Status = status
+            });
+        }
+
+        _archive.Seed(sensor.Id, packets);
+    }
+
+    private float HistoricalValue(SensorCategory category, DateTime at, out AnomalyStatus status)
+    {
+        status = AnomalyStatus.Normal;
+
+        // A gentle daily cycle with a little noise.
+        double wave = Math.Sin((at.TimeOfDay.TotalHours - 9) / 24.0 * 2 * Math.PI);
+        float swing = category switch
+        {
+            SensorCategory.Environmental => 5f,
+            SensorCategory.PowerConsumption => 35f,
+            _ => 3f
+        };
+        float noise = (float)(_rng.NextDouble() * 2 - 1);
+        float value = BaselineFor(category) + (float)wave * swing + noise;
+
+        // About 1% of readings are genuine anomalies.
+        if (category != SensorCategory.Actuator && _rng.NextDouble() < 0.01)
+        {
+            status = AnomalyStatus.Spike;
+            value = category == SensorCategory.Environmental
+                ? _rng.Next(8, 19)
+                : 335 + _rng.Next(0, 60);
+        }
+
+        return value;
     }
 
     // Mock history of past operator behaviour so the engine has patterns from the first minute.
@@ -66,31 +134,46 @@ public class TelemetrySimulatorService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
-
-        var client = _httpFactory.CreateClient("DeviceSimulator");
-
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            foreach (var sensor in _sensors.GetAll().ToList())
-            {
-                var payload = BuildPayload(sensor);
+            // Give Kestrel a moment to finish binding its addresses.
+            await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
 
-                try
+            var baseAddress = _addresses.Resolve();
+            var client = _httpFactory.CreateClient("DeviceSimulator");
+            client.BaseAddress = baseAddress;
+            _logger.LogInformation("SIMULATOR: sending readings to {Address}", baseAddress);
+
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                foreach (var sensor in _sensors.GetAll().ToList())
                 {
-                    using var response = await client.PostAsJsonAsync("api/telemetry/ingest", payload, stoppingToken);
-                    if (!response.IsSuccessStatusCode)
+                    var payload = BuildPayload(sensor);
+
+                    try
                     {
-                        _logger.LogWarning("Gateway rejected a reading from {Mac}: {Status}", sensor.MacAddress, response.StatusCode);
+                        using var response = await client.PostAsJsonAsync("api/telemetry/ingest", payload, stoppingToken);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.LogWarning("SIMULATOR: gateway rejected a reading from {Mac}: {Status}", sensor.MacAddress, response.StatusCode);
+                        }
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        _logger.LogWarning(ex, "SIMULATOR: device {Mac} could not reach the gateway at {Address}.", sensor.MacAddress, baseAddress);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex, "SIMULATOR: unexpected error for {Mac}.", sensor.MacAddress);
                     }
                 }
-                catch (HttpRequestException ex)
-                {
-                    _logger.LogWarning(ex, "Simulated device {Mac} could not reach the gateway.", sensor.MacAddress);
-                }
-            }
 
-            await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(3), stoppingToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The API is shutting down. This also stops the "TaskCanceledException" break in the debugger.
         }
     }
 
